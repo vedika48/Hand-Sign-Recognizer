@@ -1,4 +1,3 @@
-# improved_hand_sign_recognizer.py
 import cv2
 import mediapipe as mp
 import numpy as np
@@ -171,9 +170,10 @@ class HandSignRecognizer:
                     
                 elif data == 'STOP_CALIBRATE':
                     self.calibration_mode = False
+                    self.send_to_client("CALIBRATION_COMPLETE")
                     print("Ended calibration mode")
                     
-                elif data == 'LIST_GESTURES':
+                elif data == 'GET_GESTURES' or data == 'LIST_GESTURES':  # Added support for both commands
                     gesture_list = list(self.gestures.keys())
                     self.send_to_client(f"GESTURES:{','.join(gesture_list)}")
                     
@@ -210,7 +210,7 @@ class HandSignRecognizer:
                 p2 = np.array([hand_landmarks.landmark[finger[1]].x, hand_landmarks.landmark[finger[1]].y])
                 p3 = np.array([hand_landmarks.landmark[finger[2]].x, hand_landmarks.landmark[finger[2]].y])
             else:
-                p1 = np.array([hand_landmarks.landmark[0].x, hand_landmarks.landmark[0]].y)  # Wrist as base
+                p1 = np.array([hand_landmarks.landmark[0].x, hand_landmarks.landmark[0].y])  # Wrist as base
                 p2 = np.array([hand_landmarks.landmark[finger[1]].x, hand_landmarks.landmark[finger[1]].y])
                 p3 = np.array([hand_landmarks.landmark[finger[3]].x, hand_landmarks.landmark[finger[3]].y])
             
@@ -377,8 +377,8 @@ class HandSignRecognizer:
                     # Display recognized gesture
                     if gesture != self.prev_gesture:
                         if not self.calibration_mode and not self.recording_gesture:
-                            # Send to Java client only if it's a new gesture and not in special modes
-                            self.send_to_client(gesture)
+                            # Changed from DETECTED to GESTURE to match Java client expectations
+                            self.send_to_client(f"GESTURE:{gesture}")
                         self.prev_gesture = gesture
                     
                     # Display current gesture
