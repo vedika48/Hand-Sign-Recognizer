@@ -1,4 +1,7 @@
 import javax.swing.*;
+import javax.swing.event.DocumentEvent;
+import javax.swing.event.DocumentListener;
+
 import java.awt.*;
 import java.awt.event.*;
 import java.io.*;
@@ -124,12 +127,19 @@ public class HandSignUI extends JFrame {
                 BorderFactory.createLineBorder(Color.LIGHT_GRAY, 1, true)
             )
         );
-        gestureDisplayPanel.setPreferredSize(new Dimension(-1, 120)); // Fixed height
+        gestureDisplayPanel.setPreferredSize(new Dimension(-1, 150)); // Fixed height
         
         gestureLabel = new JLabel("Waiting for gesture...", SwingConstants.CENTER);
-        gestureLabel.setFont(new Font("Arial", Font.BOLD, 36));
-        gestureLabel.setBorder(BorderFactory.createEmptyBorder(20, 10, 20, 10));
+        gestureLabel.setFont(new Font("Arial", Font.BOLD, 40));
+        gestureLabel.setBorder(BorderFactory.createEmptyBorder(40, 10, 40, 10));
         gestureDisplayPanel.add(gestureLabel, BorderLayout.CENTER);
+
+        // Wrap the gesture label in another panel to better control layout
+        JPanel gestureLabelPanel = new JPanel(new GridBagLayout());
+        gestureLabelPanel.setBackground(Color.WHITE);
+        gestureLabelPanel.add(gestureLabel);
+        
+        gestureDisplayPanel.add(gestureLabelPanel, BorderLayout.CENTER);
         
         topPanel.add(gestureDisplayPanel, BorderLayout.CENTER);
         mainPanel.add(topPanel, BorderLayout.NORTH);
@@ -149,6 +159,15 @@ public class HandSignUI extends JFrame {
         logArea.setLineWrap(true);
         logArea.setWrapStyleWord(true);
         logArea.setFont(new Font("Monospaced", Font.PLAIN, 12));
+
+         // Add a document listener to keep scroll at bottom for logs
+        logArea.getDocument().addDocumentListener(new DocumentListener() {
+            public void insertUpdate(DocumentEvent e) {
+                SwingUtilities.invokeLater(() -> logArea.setCaretPosition(logArea.getDocument().getLength()));
+            }
+            public void removeUpdate(DocumentEvent e) {}
+            public void changedUpdate(DocumentEvent e) {}
+        });
         
         JScrollPane logScrollPane = new JScrollPane(logArea);
         logScrollPane.setBorder(BorderFactory.createEmptyBorder(5, 5, 5, 5));
@@ -592,13 +611,19 @@ public class HandSignUI extends JFrame {
         connected = false;
         connectionAttempts = MAX_CONNECTION_ATTEMPTS; // Prevent further automatic connection attempts
         
-        // Close socket connection
-        try {
-            if (writer != null) writer.close();
-            if (reader != null) reader.close();
-            if (socket != null) socket.close();
-        } catch (IOException e) {
-            logArea.append("Error closing connection: " + e.getMessage() + "\n");
+        // Close socket connection using try-with-resources for better resource management
+        if (socket != null) {
+            try (Socket closeSocket = socket;
+                 BufferedReader closeReader = reader;
+                 PrintWriter closeWriter = writer) {
+                // Resources will be automatically closed
+            } catch (IOException e) {
+                logArea.append("Error closing connection: " + e.getMessage() + "\n");
+            } finally {
+                socket = null;
+                reader = null;
+                writer = null;
+            }
         }
         
         stopPythonProcess();
@@ -628,8 +653,10 @@ public class HandSignUI extends JFrame {
                     logArea.append("Python process timed out, forcing termination\n");
                     pythonProcess.destroyForcibly();
                 }
+                pythonProcess = null;
             } catch (InterruptedException e) {
                 logArea.append("Error stopping Python process: " + e.getMessage() + "\n");
+                Thread.currentThread().interrupt();
             }
         }
     }
@@ -720,107 +747,120 @@ public class HandSignUI extends JFrame {
     private void readMessages() {
         if (reader == null) return;
         
-        try {
-            String message;
-            while (connected && (message = reader.readLine()) != null) {
-                final String receivedMessage = message;
-                SwingUtilities.invokeLater(() -> processMessage(receivedMessage));
+        new Thread(() -> {
+            try {
+                String message;
+                while (connected && (message = reader.readLine()) != null) {
+                    final String receivedMessage = message;
+                    SwingUtilities.invokeLater(() -> processMessage(receivedMessage));
+                }
+            } catch (IOException e) {
+                if (connected) { // Only log error if we haven't manually disconnected
+                    SwingUtilities.invokeLater(() -> {
+                        logArea.append("Connection error: " + e.getMessage() + "\n");
+                        stopRecognition(); // Auto-disconnect on error
+                    });
+                }
             }
-        } catch (IOException e) {
-            if (connected) { // Only log if we haven't already stopped
-                SwingUtilities.invokeLater(() -> {
-                    logArea.append("Lost connection to server: " + e.getMessage() + "\n");
-                    stopRecognition();
-                });
-            }
-        }
+        }).start();
     }
     
     private void processMessage(String message) {
         logArea.append("Received: " + message + "\n");
         
         if (message.startsWith("GESTURE:")) {
-            // Update the displayed gesture
-            String gesture = message.substring(8);
-            updateGestureDisplay(gesture);
-            incrementGestureCount(gesture);
+            // Handle detected gesture
+            String gestureName = message.substring(8).trim();
+            updateDetectedGesture(gestureName);
         } else if (message.startsWith("GESTURES_LIST:")) {
-            // Process the list of available gestures
-            String gestureList = message.substring(14);
-            updateAvailableGestures(gestureList);
-        } else if (message.startsWith("RECORDING_SAVED:")) {
-            // Display confirmation of saved recording
-            String gestureName = message.substring(15);
-            logArea.append("Successfully saved recording for gesture: " + gestureName + "\n");
+            // Handle list of available gestures
+            processGestureList(message.substring(14).trim());
+        } else if (message.startsWith("RECORD_SUCCESS:")) {
+            // Handle successful recording
+            String gestureName = message.substring(15).trim();
+            logArea.append("Successfully recorded gesture: " + gestureName + "\n");
             
-            // Add gesture to stats if it's new
+            // Add the gesture to stats if it's not already there
             if (!gestureCounts.containsKey(gestureName)) {
                 addGestureToStats(gestureName);
             }
-        } else if (message.startsWith("GESTURE_DELETED:")) {
-            // Handle gesture deletion confirmation
-            String gestureName = message.substring(16);
-            logArea.append("Successfully deleted gesture: " + gestureName + "\n");
-            
-            // Remove gesture from stats and combobox
-            removeGestureFromStats(gestureName);
-        } else if (message.startsWith("ERROR:")) {
-            // Handle error messages
-            String error = message.substring(6);
-            logArea.append("Server error: " + error + "\n");
+        } else if (message.startsWith("RECORD_ERROR:")) {
+            // Handle recording error
+            String error = message.substring(13).trim();
+            logArea.append("Error recording gesture: " + error + "\n");
             JOptionPane.showMessageDialog(this, 
-                "Server error: " + error, 
-                "Error", 
+                "Error recording gesture: " + error, 
+                "Recording Error", 
                 JOptionPane.ERROR_MESSAGE);
-        } else if (message.equals("CALIBRATION_COMPLETE")) {
-            // Reset calibration button
+        } else if (message.startsWith("DELETE_SUCCESS:")) {
+            // Handle successful deletion
+            String gestureName = message.substring(15).trim();
+            logArea.append("Successfully deleted gesture: " + gestureName + "\n");
+            removeGestureFromStats(gestureName);
+        } else if (message.startsWith("DELETE_ERROR:")) {
+            // Handle deletion error
+            String error = message.substring(13).trim();
+            logArea.append("Error deleting gesture: " + error + "\n");
+            JOptionPane.showMessageDialog(this, 
+                "Error deleting gesture: " + error, 
+                "Deletion Error", 
+                JOptionPane.ERROR_MESSAGE);
+        } else if (message.startsWith("CALIBRATION_COMPLETE")) {
+            // Handle calibration completion
+            logArea.append("Calibration completed successfully\n");
             calibrateButton.setText("Calibrate");
             calibrateButton.setBackground(new Color(40, 167, 69));
-            logArea.append("Calibration completed successfully\n");
+        } else if (message.startsWith("CALIBRATION_ERROR:")) {
+            // Handle calibration error
+            String error = message.substring(18).trim();
+            logArea.append("Calibration error: " + error + "\n");
+            calibrateButton.setText("Calibrate");
+            calibrateButton.setBackground(new Color(40, 167, 69));
         }
     }
     
-    private void updateGestureDisplay(String gesture) {
-        gestureLabel.setText(gesture);
-        gestureLabel.setForeground(Color.BLACK);
+    private void updateDetectedGesture(String gestureName) {
+        // Update the gesture display
+        gestureLabel.setText(gestureName);
+        gestureDisplayPanel.setBackground(Color.WHITE);
         
-        // Set background color based on the gesture
-        Color gestureColor = getGestureColor(gesture);
-        gestureDisplayPanel.setBackground(new Color(gestureColor.getRed(), 
-                                                   gestureColor.getGreen(), 
-                                                   gestureColor.getBlue(), 
-                                                   50)); // Light color with alpha
-    }
-    
-    private void incrementGestureCount(String gesture) {
-        if (gestureCounts.containsKey(gesture)) {
-            int count = gestureCounts.get(gesture) + 1;
-            gestureCounts.put(gesture, count);
+        // Update the counter for this gesture
+        if (gestureCounts.containsKey(gestureName)) {
+            int count = gestureCounts.get(gestureName) + 1;
+            gestureCounts.put(gestureName, count);
             
             // Update the counter label
-            JLabel countLabel = gestureCounters.get(gesture);
+            JLabel countLabel = gestureCounters.get(gestureName);
             if (countLabel != null) {
                 countLabel.setText("Count: " + count);
             }
         }
+        
+        // Change the color of the display panel based on the gesture
+        Color gestureColor = getGestureColor(gestureName);
+        gestureDisplayPanel.setBackground(new Color(gestureColor.getRed(), 
+                                                  gestureColor.getGreen(), 
+                                                  gestureColor.getBlue(), 
+                                                  50)); // Semi-transparent
     }
     
-    private void updateAvailableGestures(String gestureList) {
-        // Parse comma-separated gesture list
-        String[] gestures = gestureList.split(",");
+    private void processGestureList(String gestureListStr) {
+        // Process comma-separated list of gestures
+        String[] gestures = gestureListStr.split(",");
         
-        // Clear existing gestures
+        // Clear previous gestures
         availableGestures.clear();
         gestureComboBox.removeAllItems();
         
-        // Remove all existing gesture stats
+        // Clear gesture stats panel
         gestureStatsPanel.removeAll();
         gestureCounters.clear();
         gestureCounts.clear();
         
-        // Add all gestures from the list
+        // Add each gesture to UI
         for (String gesture : gestures) {
-            if (!gesture.trim().isEmpty()) {
+            gesture = gesture.trim();
+            if (!gesture.isEmpty()) {
                 availableGestures.add(gesture);
                 gestureComboBox.addItem(gesture);
                 addGestureToStats(gesture);
@@ -829,51 +869,59 @@ public class HandSignUI extends JFrame {
         
         gestureStatsPanel.revalidate();
         gestureStatsPanel.repaint();
-        logArea.append("Updated gesture list with " + gestures.length + " gestures\n");
+        
+        logArea.append("Updated gesture list: " + gestureListStr + "\n");
     }
     
-    private void removeGestureFromStats(String gesture) {
-        // Remove from data structures
-        gestureCounts.remove(gesture);
-        gestureCounters.remove(gesture);
-        availableGestures.remove(gesture);
-        
-        // Remove from combo box
+    private void requestGestureList() {
+        if (connected && writer != null) {
+            writer.println("GET_GESTURES");
+        }
+    }
+    
+    private void removeGestureFromStats(String gestureName) {
+        // Remove from combo box if present
         for (int i = 0; i < gestureComboBox.getItemCount(); i++) {
-            if (gestureComboBox.getItemAt(i).equals(gesture)) {
+            if (gestureComboBox.getItemAt(i).equals(gestureName)) {
                 gestureComboBox.removeItemAt(i);
                 break;
             }
         }
         
-        // Rebuild gesture stats panel
+        // Remove from available gestures list
+        availableGestures.remove(gestureName);
+        
+        // Remove from counters
+        gestureCounters.remove(gestureName);
+        gestureCounts.remove(gestureName);
+        
+        // Rebuild the stats panel
         gestureStatsPanel.removeAll();
-        for (String g : availableGestures) {
-            addGestureToStats(g);
+        
+        for (String gesture : availableGestures) {
+            addGestureToStats(gesture);
         }
         
         gestureStatsPanel.revalidate();
         gestureStatsPanel.repaint();
     }
     
-    private void requestGestureList() {
-        if (connected && writer != null) {
-            writer.println("GET_GESTURES");
-            logArea.append("Requesting available gestures...\n");
-        }
-    }
-    
+    // Main method to start the application
     public static void main(String[] args) {
+        // Use system look and feel
         try {
-            // Set system look and feel
             UIManager.setLookAndFeel(UIManager.getSystemLookAndFeelClassName());
         } catch (Exception e) {
             e.printStackTrace();
         }
         
+        // Start UI on EDT
         SwingUtilities.invokeLater(() -> {
-            HandSignUI app = new HandSignUI();
-            app.setVisible(true);
+            HandSignUI ui = new HandSignUI();
+            ui.setVisible(true);
+            ui.logArea.append("Hand Sign Recognizer UI started\n");
+            ui.logArea.append("Configure settings in the Configuration tab\n");
+            ui.logArea.append("Click 'Start Recognition' to begin\n");
         });
     }
 }
