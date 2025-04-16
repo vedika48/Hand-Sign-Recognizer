@@ -53,7 +53,7 @@ public class HandSignUI extends JFrame {
     private String serverHost = DEFAULT_SERVER_HOST;
     private int serverPort = DEFAULT_SERVER_PORT;
     private String pythonExecutable = "python";  // Default, can be changed to python3
-    private String scriptPath = "improved_hand_sign_recognizer.py";
+    private String scriptPath = "hand_sign_recognizer.py";
     
     public HandSignUI() {
         setupUI();
@@ -62,7 +62,7 @@ public class HandSignUI extends JFrame {
     
     private void setupUI() {
         // Basic frame setup
-        setTitle("Advanced Hand Sign Recognizer");
+        setTitle("Hand Sign Recognizer");
         setSize(900, 650);
         setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
         setLayout(new BorderLayout(10, 10));
@@ -118,7 +118,6 @@ public class HandSignUI extends JFrame {
         topPanel.add(statusPanel, BorderLayout.NORTH);
         
         // ===== GESTURE DISPLAY =====
-        // FIXED: Improved gesture display panel with fixed height
         gestureDisplayPanel = new JPanel(new BorderLayout());
         gestureDisplayPanel.setBackground(Color.WHITE);
         gestureDisplayPanel.setBorder(
@@ -205,11 +204,11 @@ public class HandSignUI extends JFrame {
         JPanel recordControlPanel = new JPanel(new FlowLayout(FlowLayout.LEFT));
         recordControlPanel.setBackground(BACKGROUND_COLOR);
         
-        recordGestureButton = createStyledButton("Record Gesture", new Color(0, 123, 255));
+        recordGestureButton = createStyledButton("Record Gesture", new Color(0, 123, 155));
         recordGestureButton.setEnabled(false);
-        stopRecordingButton = createStyledButton("Stop Recording", new Color(220, 53, 69));
+        stopRecordingButton = createStyledButton("Stop Recording", new Color(120, 53, 69));
         stopRecordingButton.setEnabled(false);
-        deleteGestureButton = createStyledButton("Delete Gesture", new Color(108, 117, 125));
+        deleteGestureButton = createStyledButton("Delete Gesture", new Color(54, 58, 62));
         deleteGestureButton.setEnabled(false);
         
         recordControlPanel.add(recordGestureButton);
@@ -697,7 +696,6 @@ public class HandSignUI extends JFrame {
             calibrateButton.setEnabled(false);
             deleteGestureButton.setEnabled(false);
             
-            // Update UI to show recording state
             gestureLabel.setText("RECORDING: " + gestureName);
             gestureLabel.setForeground(Color.WHITE);
             gestureDisplayPanel.setBackground(new Color(220, 53, 69));
@@ -714,7 +712,6 @@ public class HandSignUI extends JFrame {
             calibrateButton.setEnabled(true);
             deleteGestureButton.setEnabled(true);
             
-            // Reset UI
             gestureLabel.setText("Waiting for gesture...");
             gestureLabel.setForeground(Color.BLACK);
             gestureDisplayPanel.setBackground(Color.WHITE);
