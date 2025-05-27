@@ -126,11 +126,11 @@ public class HandSignUI extends JFrame {
                 BorderFactory.createLineBorder(Color.LIGHT_GRAY, 1, true)
             )
         );
-        gestureDisplayPanel.setPreferredSize(new Dimension(-1, 150)); // Fixed height
+        gestureDisplayPanel.setPreferredSize(new Dimension(-1, 180)); // Fixed height
         
         gestureLabel = new JLabel("Waiting for gesture...", SwingConstants.CENTER);
         gestureLabel.setFont(new Font("Arial", Font.BOLD, 40));
-        gestureLabel.setBorder(BorderFactory.createEmptyBorder(40, 10, 40, 10));
+        gestureLabel.setBorder(BorderFactory.createEmptyBorder(20, 10, 20, 10));
         gestureDisplayPanel.add(gestureLabel, BorderLayout.CENTER);
 
         // Wrap the gesture label in another panel to better control layout

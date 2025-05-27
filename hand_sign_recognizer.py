@@ -191,7 +191,6 @@ class HandSignRecognizer:
             print(f"Error reading from client: {e}")
     
     def calculate_finger_angles(self, hand_landmarks):
-        """Calculate the angles of finger joints to determine pose"""
         # Define landmarks for each finger
         fingers = [
             [1, 2, 3, 4],      # Thumb
