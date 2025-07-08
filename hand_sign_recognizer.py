@@ -6,417 +6,432 @@ import threading
 import time
 import os
 import pickle
+import json
 from scipy.spatial import distance
+from collections import deque
+import warnings
+warnings.filterwarnings('ignore')
 
-class HandSignRecognizer:
+class EnhancedHandSignRecognizer:
     def __init__(self, port=5000):
-        # Initialize MediaPipe
+        print("🚀 Initializing Enhanced Hand Sign Recognition System...")
+        
+        # Initialize MediaPipe with optimized settings
         self.mp_hands = mp.solutions.hands
         self.hands = self.mp_hands.Hands(
             static_image_mode=False,
             max_num_hands=2,
-            min_detection_confidence=0.7,
-            min_tracking_confidence=0.7
+            min_detection_confidence=0.8,
+            min_tracking_confidence=0.8
         )
         self.mp_drawing = mp.solutions.drawing_utils
         self.mp_drawing_styles = mp.solutions.drawing_styles
         
-        # Socket for communication with Java UI
+        # Enhanced socket configuration
         self.port = port
         self.server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.server_socket.bind(('localhost', self.port))
-        self.server_socket.listen(1)
+        self.server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         
-        # Default gesture database (will be expanded with custom gestures)
-        self.gestures_dir = "gestures"
-        os.makedirs(self.gestures_dir, exist_ok=True)
+        # Sign recognition database
+        self.sign_database = {
+            'thumbs_up': {'description': 'Thumbs up gesture', 'confidence_threshold': 0.85},
+            'thumbs_down': {'description': 'Thumbs down gesture', 'confidence_threshold': 0.85},
+            'peace': {'description': 'Peace sign (V)', 'confidence_threshold': 0.80},
+            'ok': {'description': 'OK gesture', 'confidence_threshold': 0.80},
+            'fist': {'description': 'Closed fist', 'confidence_threshold': 0.85},
+            'open_palm': {'description': 'Open palm', 'confidence_threshold': 0.75},
+            'pointing': {'description': 'Pointing finger', 'confidence_threshold': 0.80},
+            'rock': {'description': 'Rock sign', 'confidence_threshold': 0.80},
+            'stop': {'description': 'Stop gesture', 'confidence_threshold': 0.80}
+        }
         
-        # Load gestures or create default ones
-        self.load_gestures()
+        # Gesture smoothing and stability
+        self.gesture_history = deque(maxlen=10)
+        self.last_gesture = None
+        self.gesture_stability_threshold = 0.7
         
-        # Tracking variables
-        self.client = None
-        self.running = False
-        self.prev_gesture = "unknown"
-        self.gesture_history = []
-        self.history_max_length = 5  # For smoothing
-        self.calibration_mode = False
-        self.recording_gesture = False
-        self.recording_name = ""
-        self.recording_frames = []
-        self.recording_max_frames = 30
+        # Client connections
+        self.clients = []
+        self.is_running = False
         
-    def load_gestures(self):
-        """Load gestures from files or use defaults"""
-        self.gestures = {}
+        # Performance metrics
+        self.fps_counter = 0
+        self.fps_start_time = time.time()
+        self.current_fps = 0
         
-        # Try to load saved gestures
-        gesture_files = [f for f in os.listdir(self.gestures_dir) 
-                        if f.endswith('.pkl')]
+        # Data storage
+        self.data_dir = "gesture_data"
+        os.makedirs(self.data_dir, exist_ok=True)
         
-        if gesture_files:
-            for gesture_file in gesture_files:
-                name = gesture_file.replace('.pkl', '')
-                with open(os.path.join(self.gestures_dir, gesture_file), 'rb') as f:
-                    self.gestures[name] = pickle.load(f)
-        else:
-            # Default gestures as fallback - now using joint angles instead of just extension
-            self.gestures = {
-                "thumbs_up": {
-                    "angles": np.array([0.2, -0.9, -0.9, -0.9, -0.9]),  # Thumb up, others folded
-                    "distances": np.array([0.3, 0.8, 0.8, 0.8, 0.8])    # Relative distances
-                },
-                "victory": {
-                    "angles": np.array([-0.9, 0.3, 0.3, -0.9, -0.9]),   # Index and middle up
-                    "distances": np.array([0.8, 0.2, 0.2, 0.8, 0.8])
-                },
-                "ok": {
-                    "angles": np.array([0.3, 0.3, -0.9, -0.9, -0.9]),   # Thumb and index forming circle
-                    "distances": np.array([0.2, 0.2, 0.8, 0.8, 0.8])
-                },
-                "pointing": {
-                    "angles": np.array([-0.9, 0.3, -0.9, -0.9, -0.9]),  # Index pointing
-                    "distances": np.array([0.8, 0.2, 0.8, 0.8, 0.8])
-                },
-                "five": {
-                    "angles": np.array([0.3, 0.3, 0.3, 0.3, 0.3]),      # All fingers extended
-                    "distances": np.array([0.2, 0.2, 0.2, 0.2, 0.2])
-                }
-            }
-            
-            # Save default gestures
-            for name, data in self.gestures.items():
-                self.save_gesture(name, data)
+        print("✅ System initialized successfully!")
     
-    def save_gesture(self, name, data):
-        """Save a gesture to file"""
-        with open(os.path.join(self.gestures_dir, f"{name}.pkl"), 'wb') as f:
-            pickle.dump(data, f)
+    def calculate_hand_features(self, landmarks):
+        """Extract comprehensive hand features from landmarks"""
+        if not landmarks:
+            return None
+        
+        # Convert landmarks to numpy array
+        points = np.array([[lm.x, lm.y, lm.z] for lm in landmarks.landmark])
+        
+        # Calculate distances between key points
+        thumb_tip = points[4]
+        thumb_mcp = points[2]
+        index_tip = points[8]
+        index_mcp = points[5]
+        middle_tip = points[12]
+        middle_mcp = points[9]
+        ring_tip = points[16]
+        ring_mcp = points[13]
+        pinky_tip = points[20]
+        pinky_mcp = points[17]
+        wrist = points[0]
+        
+        # Calculate finger extensions
+        thumb_extended = distance.euclidean(thumb_tip, wrist) > distance.euclidean(thumb_mcp, wrist)
+        index_extended = distance.euclidean(index_tip, wrist) > distance.euclidean(index_mcp, wrist)
+        middle_extended = distance.euclidean(middle_tip, wrist) > distance.euclidean(middle_mcp, wrist)
+        ring_extended = distance.euclidean(ring_tip, wrist) > distance.euclidean(ring_mcp, wrist)
+        pinky_extended = distance.euclidean(pinky_tip, wrist) > distance.euclidean(pinky_mcp, wrist)
+        
+        # Calculate angles between fingers
+        thumb_angle = self.calculate_angle(thumb_mcp, thumb_tip, wrist)
+        index_angle = self.calculate_angle(index_mcp, index_tip, wrist)
+        
+        # Hand orientation
+        hand_vector = middle_mcp - wrist
+        hand_angle = np.arctan2(hand_vector[1], hand_vector[0])
+        
+        return {
+            'finger_states': [thumb_extended, index_extended, middle_extended, ring_extended, pinky_extended],
+            'finger_distances': [
+                distance.euclidean(thumb_tip, wrist),
+                distance.euclidean(index_tip, wrist),
+                distance.euclidean(middle_tip, wrist),
+                distance.euclidean(ring_tip, wrist),
+                distance.euclidean(pinky_tip, wrist)
+            ],
+            'finger_angles': [thumb_angle, index_angle],
+            'hand_orientation': hand_angle,
+            'palm_center': np.mean(points, axis=0),
+            'landmarks': points
+        }
+    
+    def calculate_angle(self, point1, point2, point3):
+        """Calculate angle between three points"""
+        vector1 = point1 - point2
+        vector2 = point3 - point2
+        
+        cos_angle = np.dot(vector1, vector2) / (np.linalg.norm(vector1) * np.linalg.norm(vector2))
+        cos_angle = np.clip(cos_angle, -1, 1)
+        angle = np.arccos(cos_angle)
+        
+        return np.degrees(angle)
+    
+    def recognize_gesture(self, features):
+        """Advanced gesture recognition using hand features"""
+        if not features:
+            return None, 0.0
+        
+        finger_states = features['finger_states']
+        finger_distances = features['finger_distances']
+        
+        # Thumbs up detection
+        if finger_states[0] and not any(finger_states[1:]):
+            return 'thumbs_up', 0.9
+        
+        # Thumbs down detection (thumb extended downward)
+        if finger_states[0] and not any(finger_states[1:]) and features['hand_orientation'] > 1.5:
+            return 'thumbs_down', 0.9
+        
+        # Peace sign (index and middle extended)
+        if finger_states[1] and finger_states[2] and not finger_states[0] and not finger_states[3] and not finger_states[4]:
+            return 'peace', 0.85
+        
+        # OK gesture (thumb and index forming circle)
+        thumb_index_distance = distance.euclidean(features['landmarks'][4], features['landmarks'][8])
+        if thumb_index_distance < 0.05 and finger_states[2] and finger_states[3] and finger_states[4]:
+            return 'ok', 0.85
+        
+        # Fist (no fingers extended)
+        if not any(finger_states):
+            return 'fist', 0.9
+        
+        # Open palm (all fingers extended)
+        if all(finger_states):
+            return 'open_palm', 0.8
+        
+        # Pointing (only index extended)
+        if finger_states[1] and not finger_states[0] and not finger_states[2] and not finger_states[3] and not finger_states[4]:
+            return 'pointing', 0.85
+        
+        # Rock sign (index and pinky extended)
+        if finger_states[1] and finger_states[4] and not finger_states[2] and not finger_states[3]:
+            return 'rock', 0.8
+        
+        # Stop gesture (all fingers extended, vertical orientation)
+        if all(finger_states) and abs(features['hand_orientation']) < 0.5:
+            return 'stop', 0.8
+        
+        return None, 0.0
+    
+    def smooth_gesture(self, gesture, confidence):
+        """Apply temporal smoothing to gesture recognition"""
+        if gesture is None:
+            return None, 0.0
+        
+        # Add to history
+        self.gesture_history.append((gesture, confidence))
+        
+        # Calculate gesture stability
+        if len(self.gesture_history) < 5:
+            return gesture, confidence
+        
+        # Count occurrences of each gesture in recent history
+        gesture_counts = {}
+        total_confidence = 0
+        
+        for g, c in list(self.gesture_history)[-5:]:
+            if g not in gesture_counts:
+                gesture_counts[g] = []
+            gesture_counts[g].append(c)
+            total_confidence += c
+        
+        # Find most stable gesture
+        most_stable_gesture = None
+        max_stability = 0
+        
+        for g, confidences in gesture_counts.items():
+            stability = len(confidences) / 5.0 * np.mean(confidences)
+            if stability > max_stability:
+                max_stability = stability
+                most_stable_gesture = g
+        
+        if max_stability >= self.gesture_stability_threshold:
+            return most_stable_gesture, max_stability
+        
+        return None, 0.0
+    
+    def process_frame(self, frame):
+        """Process a single frame for hand detection and gesture recognition"""
+        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        results = self.hands.process(rgb_frame)
+        
+        gesture_data = {
+            'timestamp': time.time(),
+            'gestures': [],
+            'fps': self.current_fps
+        }
+        
+        if results.multi_hand_landmarks:
+            for hand_idx, hand_landmarks in enumerate(results.multi_hand_landmarks):
+                # Extract hand features
+                features = self.calculate_hand_features(hand_landmarks)
+                
+                # Recognize gesture
+                gesture, confidence = self.recognize_gesture(features)
+                
+                # Apply smoothing
+                stable_gesture, stable_confidence = self.smooth_gesture(gesture, confidence)
+                
+                if stable_gesture and stable_confidence > self.sign_database.get(stable_gesture, {}).get('confidence_threshold', 0.7):
+                    gesture_info = {
+                        'hand_index': hand_idx,
+                        'gesture': stable_gesture,
+                        'confidence': stable_confidence,
+                        'description': self.sign_database[stable_gesture]['description'],
+                        'hand_position': features['palm_center'].tolist()
+                    }
+                    gesture_data['gestures'].append(gesture_info)
+                
+                # Draw landmarks
+                self.mp_drawing.draw_landmarks(
+                    frame,
+                    hand_landmarks,
+                    self.mp_hands.HAND_CONNECTIONS,
+                    self.mp_drawing_styles.get_default_hand_landmarks_style(),
+                    self.mp_drawing_styles.get_default_hand_connections_style()
+                )
+        
+        return frame, gesture_data
+    
+    def update_fps(self):
+        """Update FPS counter"""
+        self.fps_counter += 1
+        current_time = time.time()
+        
+        if current_time - self.fps_start_time >= 1.0:
+            self.current_fps = self.fps_counter
+            self.fps_counter = 0
+            self.fps_start_time = current_time
+    
+    def broadcast_to_clients(self, data):
+        """Send data to all connected clients"""
+        message = json.dumps(data) + '\n'
+        disconnected_clients = []
+        
+        for client in self.clients:
+            try:
+                client.send(message.encode('utf-8'))
+            except:
+                disconnected_clients.append(client)
+        
+        # Remove disconnected clients
+        for client in disconnected_clients:
+            self.clients.remove(client)
+            client.close()
+    
+    def handle_client(self, client_socket, address):
+        """Handle individual client connections"""
+        print(f"📱 Client connected from {address}")
+        
+        try:
+            while self.is_running:
+                # Send heartbeat
+                heartbeat = json.dumps({'type': 'heartbeat', 'timestamp': time.time()}) + '\n'
+                client_socket.send(heartbeat.encode('utf-8'))
+                time.sleep(1)
+        except:
+            pass
+        finally:
+            if client_socket in self.clients:
+                self.clients.remove(client_socket)
+            client_socket.close()
+            print(f"📱 Client {address} disconnected")
     
     def start_server(self):
-        """Start the server to communicate with Java client"""
-        print(f"Starting server on port {self.port}")
-        self.running = True
-        
-        # Accept client connection in a separate thread
-        thread = threading.Thread(target=self.accept_client)
-        thread.daemon = True
-        thread.start()
-        
-    def accept_client(self):
-        """Accept a client connection"""
+        """Start the socket server"""
         try:
-            self.client, addr = self.server_socket.accept()
-            print(f"Connection from {addr}")
+            self.server_socket.bind(('localhost', self.port))
+            self.server_socket.listen(5)
+            print(f"🌐 Server started on port {self.port}")
             
-            # Start reading commands from client
-            read_thread = threading.Thread(target=self.read_from_client)
-            read_thread.daemon = True
-            read_thread.start()
-            
-            # Start processing video after client connects
-            self.process_video()
-        except Exception as e:
-            print(f"Error accepting client: {e}")
-        finally:
-            if self.client:
-                self.client.close()
-            self.server_socket.close()
-    
-    def read_from_client(self):
-        """Read commands from the Java client"""
-        try:
-            while self.running:
-                data = self.client.recv(1024).decode('utf-8').strip()
-                if not data:
+            while self.is_running:
+                try:
+                    client_socket, address = self.server_socket.accept()
+                    self.clients.append(client_socket)
+                    
+                    # Start client handler thread
+                    client_thread = threading.Thread(
+                        target=self.handle_client,
+                        args=(client_socket, address)
+                    )
+                    client_thread.daemon = True
+                    client_thread.start()
+                    
+                except socket.error:
                     break
                     
-                if data.startswith('CALIBRATE:'):
-                    self.calibration_mode = True
-                    print("Starting calibration mode")
-                    
-                elif data.startswith('RECORD:'):
-                    self.recording_gesture = True
-                    self.recording_frames = []
-                    self.recording_name = data.split(':')[1]
-                    print(f"Recording new gesture: {self.recording_name}")
-                    
-                elif data == 'STOP_RECORD':
-                    if self.recording_gesture and self.recording_frames:
-                        # Calculate the average values to use as the gesture template
-                        angles_sum = np.zeros(5)
-                        distances_sum = np.zeros(5)
-                        
-                        for frame in self.recording_frames:
-                            angles_sum += frame["angles"]
-                            distances_sum += frame["distances"]
-                        
-                        avg_angles = angles_sum / len(self.recording_frames)
-                        avg_distances = distances_sum / len(self.recording_frames)
-                        
-                        # Save the new gesture
-                        new_gesture = {
-                            "angles": avg_angles,
-                            "distances": avg_distances
-                        }
-                        
-                        self.gestures[self.recording_name] = new_gesture
-                        self.save_gesture(self.recording_name, new_gesture)
-                        
-                        self.send_to_client(f"GESTURE_SAVED:{self.recording_name}")
-                    
-                    self.recording_gesture = False
-                    print("Stopped recording gesture")
-                    
-                elif data == 'STOP_CALIBRATE':
-                    self.calibration_mode = False
-                    self.send_to_client("CALIBRATION_COMPLETE")
-                    print("Ended calibration mode")
-                    
-                elif data == 'GET_GESTURES' or data == 'LIST_GESTURES':  # Added support for both commands
-                    gesture_list = list(self.gestures.keys())
-                    self.send_to_client(f"GESTURES:{','.join(gesture_list)}")
-                    
-                elif data.startswith('DELETE_GESTURE:'):
-                    gesture_name = data.split(':')[1]
-                    if gesture_name in self.gestures:
-                        del self.gestures[gesture_name]
-                        try:
-                            os.remove(os.path.join(self.gestures_dir, f"{gesture_name}.pkl"))
-                        except:
-                            pass
-                        self.send_to_client(f"DELETED:{gesture_name}")
-                
         except Exception as e:
-            print(f"Error reading from client: {e}")
+            print(f"❌ Server error: {e}")
+        finally:
+            self.server_socket.close()
     
-    def calculate_finger_angles(self, hand_landmarks):
-        # Define landmarks for each finger
-        fingers = [
-            [1, 2, 3, 4],      # Thumb
-            [5, 6, 7, 8],      # Index
-            [9, 10, 11, 12],   # Middle
-            [13, 14, 15, 16],  # Ring
-            [17, 18, 19, 20]   # Pinky
-        ]
+    def save_gesture_data(self, gesture_data):
+        """Save gesture data to file"""
+        filename = os.path.join(self.data_dir, f"gestures_{int(time.time())}.json")
         
-        angles = np.zeros(5)
-        
-        for i, finger in enumerate(fingers):
-            # Get the coordinates of the three joints (for angle calculation)
-            if i == 0:  # For thumb we use different points
-                p1 = np.array([hand_landmarks.landmark[finger[0]].x, hand_landmarks.landmark[finger[0]].y])
-                p2 = np.array([hand_landmarks.landmark[finger[1]].x, hand_landmarks.landmark[finger[1]].y])
-                p3 = np.array([hand_landmarks.landmark[finger[2]].x, hand_landmarks.landmark[finger[2]].y])
-            else:
-                p1 = np.array([hand_landmarks.landmark[0].x, hand_landmarks.landmark[0].y])  # Wrist as base
-                p2 = np.array([hand_landmarks.landmark[finger[1]].x, hand_landmarks.landmark[finger[1]].y])
-                p3 = np.array([hand_landmarks.landmark[finger[3]].x, hand_landmarks.landmark[finger[3]].y])
-            
-            # Calculate vectors
-            v1 = p1 - p2
-            v2 = p3 - p2
-            
-            # Calculate angle between vectors
-            cosine_angle = np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2))
-            angle = np.arccos(np.clip(cosine_angle, -1.0, 1.0))
-            
-            # Normalize angle to a value between -1 and 1
-            # Where 1 is fully extended, -1 is fully bent
-            normalized_angle = 1.0 - (angle / np.pi * 2)
-            angles[i] = normalized_angle
-        
-        return angles
+        with open(filename, 'w') as f:
+            json.dump(gesture_data, f, indent=2)
     
-    def calculate_finger_distances(self, hand_landmarks):
-        """Calculate the normalized distances of fingertips to palm center"""
-        # Get palm center (average of bases of all fingers except thumb)
-        palm_points = [0, 5, 9, 13, 17]
-        palm_x = np.mean([hand_landmarks.landmark[i].x for i in palm_points])
-        palm_y = np.mean([hand_landmarks.landmark[i].y for i in palm_points])
-        palm_center = np.array([palm_x, palm_y])
+    def run(self):
+        """Main execution loop"""
+        print("🎥 Starting camera feed...")
         
-        # Get fingertips
-        fingertips = [4, 8, 12, 16, 20]
-        distances = np.zeros(5)
+        # Start server thread
+        self.is_running = True
+        server_thread = threading.Thread(target=self.start_server)
+        server_thread.daemon = True
+        server_thread.start()
         
-        # Calculate distance from fingertip to palm
-        max_dist = 0
-        for i, tip in enumerate(fingertips):
-            tip_pos = np.array([hand_landmarks.landmark[tip].x, hand_landmarks.landmark[tip].y])
-            dist = np.linalg.norm(tip_pos - palm_center)
-            distances[i] = dist
-            max_dist = max(max_dist, dist)
-        
-        # Normalize distances
-        if max_dist > 0:
-            distances = distances / max_dist
-        
-        # Invert so that 1.0 is fully extended, 0.0 is to the palm
-        distances = 1.0 - distances
-        
-        return distances
-        
-    def recognize_gesture(self, finger_angles, finger_distances):
-        """Recognize gesture based on finger angles and distances"""
-        if self.calibration_mode or self.recording_gesture:
-            return "calibrating"
-            
-        best_match = "unknown"
-        best_score = 0.6  # Threshold for minimum match score
-        
-        for name, template in self.gestures.items():
-            # Calculate similarities for angles and distances
-            angle_similarity = 1.0 - np.mean(np.abs(finger_angles - template["angles"]))
-            dist_similarity = 1.0 - np.mean(np.abs(finger_distances - template["distances"]))
-            
-            # Combined score (weighted)
-            similarity = (angle_similarity * 0.7) + (dist_similarity * 0.3)
-            
-            if similarity > best_score:
-                best_score = similarity
-                best_match = name
-        
-        return best_match
-    
-    def smooth_gesture_prediction(self, gesture):
-        """Smooth gesture predictions to prevent flickering"""
-        self.gesture_history.append(gesture)
-        if len(self.gesture_history) > self.history_max_length:
-            self.gesture_history.pop(0)
-            
-        # Count frequencies of gestures in history
-        gesture_counts = {}
-        for g in self.gesture_history:
-            if g not in gesture_counts:
-                gesture_counts[g] = 0
-            gesture_counts[g] += 1
-        
-        # Find the most common gesture
-        most_common = max(gesture_counts, key=gesture_counts.get)
-        
-        # Only change gesture if it's consistently recognized
-        if gesture_counts[most_common] >= self.history_max_length * 0.6:  # 60% threshold
-            return most_common
-        else:
-            return self.prev_gesture
-    
-    def send_to_client(self, message):
-        """Send message to Java client"""
-        if self.client:
-            try:
-                self.client.send((message + "\n").encode())
-            except Exception as e:
-                print(f"Error sending to client: {e}")
-    
-    def process_video(self):
-        """Process video feed and recognize hand signs"""
+        # Initialize camera
         cap = cv2.VideoCapture(0)
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        cap.set(cv2.CAP_PROP_FPS, 30)
         
-        frame_count = 0
+        if not cap.isOpened():
+            print("❌ Error: Could not open camera")
+            return
         
-        while self.running:
-            success, image = cap.read()
-            if not success:
-                print("Failed to capture image")
-                break
+        print("✅ Camera initialized successfully")
+        print("🎮 Press 'q' to quit, 's' to save current gesture data")
+        
+        gesture_log = []
+        
+        try:
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    print("❌ Error: Could not read frame")
+                    break
                 
-            # Flip the image horizontally for a more intuitive mirror view
-            image = cv2.flip(image, 1)
-            
-            # Convert image to RGB for MediaPipe
-            image_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-            results = self.hands.process(image_rgb)
-            
-            # Display mode status
-            if self.calibration_mode:
-                cv2.putText(image, "CALIBRATION MODE", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 
-                            0.7, (0, 0, 255), 2, cv2.LINE_AA)
-            
-            if self.recording_gesture:
-                cv2.putText(image, f"RECORDING: {self.recording_name}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 
-                            0.7, (0, 255, 0), 2, cv2.LINE_AA)
-                cv2.putText(image, f"Frames: {len(self.recording_frames)}/{self.recording_max_frames}", 
-                            (10, 60), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2, cv2.LINE_AA)
-            
-            # Draw hand landmarks on the image
-            if results.multi_hand_landmarks:
-                for hand_landmarks in results.multi_hand_landmarks:
-                    # Draw the detailed hand landmarks
-                    self.mp_drawing.draw_landmarks(
-                        image, 
-                        hand_landmarks, 
-                        self.mp_hands.HAND_CONNECTIONS,
-                        self.mp_drawing_styles.get_default_hand_landmarks_style(),
-                        self.mp_drawing_styles.get_default_hand_connections_style()
-                    )
-                    
-                    # Calculate finger features
-                    finger_angles = self.calculate_finger_angles(hand_landmarks)
-                    finger_distances = self.calculate_finger_distances(hand_landmarks)
-                    
-                    # If in recording mode, save frames
-                    if self.recording_gesture and len(self.recording_frames) < self.recording_max_frames:
-                        # Only record every 2 frames
-                        if frame_count % 2 == 0:
-                            self.recording_frames.append({
-                                "angles": finger_angles,
-                                "distances": finger_distances
-                            })
-                    
-                    # Recognize gesture
-                    gesture = self.recognize_gesture(finger_angles, finger_distances)
-                    
-                    # Apply smoothing unless in calibration/recording mode
-                    if not self.calibration_mode and not self.recording_gesture:
-                        gesture = self.smooth_gesture_prediction(gesture)
-                    
-                    # Display recognized gesture
-                    if gesture != self.prev_gesture:
-                        if not self.calibration_mode and not self.recording_gesture:
-                            # Changed from DETECTED to GESTURE to match Java client expectations
-                            self.send_to_client(f"GESTURE:{gesture}")
-                        self.prev_gesture = gesture
-                    
-                    # Display current gesture
-                    cv2.putText(image, gesture, (10, image.shape[0] - 20), cv2.FONT_HERSHEY_SIMPLEX, 
-                                1, (0, 255, 0), 2, cv2.LINE_AA)
-                    
-                    # Show finger values for debugging
-                    if self.calibration_mode:
-                        # Display finger angles
-                        for i, angle in enumerate(finger_angles):
-                            cv2.putText(image, f"F{i+1}: {angle:.2f}", (image.shape[1] - 150, 30 + i*20), 
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 1, cv2.LINE_AA)
-            
-            # Display the image
-            cv2.imshow('Hand Sign Recognizer', image)
-            
-            # Increment frame counter
-            frame_count += 1
-            
-            if cv2.waitKey(5) & 0xFF == 27:  # ESC key
-                break
+                # Process frame
+                processed_frame, gesture_data = self.process_frame(frame)
+                
+                # Update FPS
+                self.update_fps()
+                
+                # Add FPS to frame
+                cv2.putText(processed_frame, f"FPS: {self.current_fps}", (10, 30),
+                           cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                
+                # Add gesture info to frame
+                y_offset = 60
+                for gesture_info in gesture_data['gestures']:
+                    text = f"{gesture_info['description']}: {gesture_info['confidence']:.2f}"
+                    cv2.putText(processed_frame, text, (10, y_offset),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+                    y_offset += 30
+                
+                # Broadcast to clients
+                if gesture_data['gestures']:
+                    self.broadcast_to_clients(gesture_data)
+                    gesture_log.append(gesture_data)
+                
+                # Display frame
+                cv2.imshow('Enhanced Hand Sign Recognition', processed_frame)
+                
+                # Handle keyboard input
+                key = cv2.waitKey(1) & 0xFF
+                if key == ord('q'):
+                    break
+                elif key == ord('s'):
+                    self.save_gesture_data(gesture_log)
+                    print("💾 Gesture data saved!")
+                
+        except KeyboardInterrupt:
+            print("\n🛑 Shutting down...")
         
-        cap.release()
-        cv2.destroyAllWindows()
-    
-    def stop(self):
-        """Stop the recognizer"""
-        self.running = False
-        if self.client:
-            self.client.close()
-        self.server_socket.close()
+        finally:
+            # Cleanup
+            self.is_running = False
+            cap.release()
+            cv2.destroyAllWindows()
+            self.server_socket.close()
+            
+            # Close all client connections
+            for client in self.clients:
+                client.close()
+            
+            print("👋 Goodbye!")
 
+# Example usage and testing
 if __name__ == "__main__":
-    recognizer = HandSignRecognizer()
-    recognizer.start_server()
+    # Create and run the enhanced hand sign recognizer
+    recognizer = EnhancedHandSignRecognizer(port=5000)
     
-    try:
-        # Keep main thread alive
-        while recognizer.running:
-            time.sleep(1)
-    except KeyboardInterrupt:
-        recognizer.stop()
+    print("🔧 Starting Enhanced Hand Sign Recognition System...")
+    print("📋 Supported gestures:")
+    for gesture, info in recognizer.sign_database.items():
+        print(f"  • {gesture}: {info['description']}")
+    
+    print("\n🎯 Features:")
+    print("  • Real-time hand tracking with MediaPipe")
+    print("  • Advanced gesture recognition algorithm")
+    print("  • Temporal smoothing for stability")
+    print("  • Socket server for client communication")
+    print("  • Performance monitoring and data logging")
+    print("  • Multi-hand support")
+    
+    # Run the system
+    recognizer.run()
