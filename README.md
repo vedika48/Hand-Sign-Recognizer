@@ -24,12 +24,3 @@ An advanced AI-powered hand gesture recognition system combining MediaPipe for r
 | Fist          | ✊   | Closed hand          |
 | Rock          | 🤘   | Index and pinky out  |
 | Stop          | ✋   | Raised open hand     |
-
-## System Architecture 🏗️
-
-```mermaid
-graph TD
-    A[Webcam] --> B[Python Backend]
-    B -->|WebSocket| C[React Frontend]
-    B --> D[MediaPipe Hand Tracking]
-    C --> E[Gesture Visualization]
