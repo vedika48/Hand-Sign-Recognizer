@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Camera, Wifi, WifiOff, Hand, Activity, Users, Plus, Trash2, BookOpen, Save, X, Eye, Settings, Zap, AlertCircle } from 'lucide-react';
+import { Camera, Wifi, WifiOff, Hand, Activity, Users, Plus, Trash2, BookOpen, Save, X, Eye, Settings, Zap, AlertCircle, Video, VideoOff } from 'lucide-react';
 import './App.css';
 
 const App = () => {
@@ -20,10 +20,68 @@ const App = () => {
   const [newGestureDescription, setNewGestureDescription] = useState('');
   const [showSettings, setShowSettings] = useState(false);
   const [error, setError] = useState(null);
+  const [isCameraActive, setIsCameraActive] = useState(false);
+  const [cameraStream, setCameraStream] = useState(null);
+  const [cameraError, setCameraError] = useState(null);
   
   const wsRef = useRef(null);
   const reconnectTimeoutRef = useRef(null);
+  const videoRef = useRef(null);
+  const canvasRef = useRef(null);
   const maxReconnectAttempts = 5;
+
+  // Initialize camera
+  const initializeCamera = async () => {
+    try {
+      setCameraError(null);
+      const stream = await navigator.mediaDevices.getUserMedia({ 
+        video: { 
+          width: { ideal: 640 },
+          height: { ideal: 480 },
+          frameRate: { ideal: 30 }
+        } 
+      });
+      
+      setCameraStream(stream);
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+      }
+      setIsCameraActive(true);
+    } catch (err) {
+      console.error('Error accessing camera:', err);
+      setCameraError('Cannot access camera. Please check permissions.');
+      setIsCameraActive(false);
+    }
+  };
+
+  const stopCamera = () => {
+    if (cameraStream) {
+      cameraStream.getTracks().forEach(track => track.stop());
+      setCameraStream(null);
+    }
+    setIsCameraActive(false);
+    if (videoRef.current) {
+      videoRef.current.srcObject = null;
+    }
+  };
+
+  const captureFrame = () => {
+    if (!videoRef.current || !canvasRef.current || !isCameraActive) return null;
+    
+    const video = videoRef.current;
+    const canvas = canvasRef.current;
+    const ctx = canvas.getContext('2d');
+    
+    // Set canvas size to match video
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    
+    // Draw current video frame to canvas
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    
+    // Convert to base64 for sending
+    return canvas.toDataURL('image/jpeg', 0.8);
+  };
 
   const connectWebSocket = () => {
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
@@ -43,6 +101,11 @@ const App = () => {
         setReconnectAttempts(0);
         setError(null);
         sendMessage({ type: 'get_gestures' });
+        
+        // Start sending frames if camera is active
+        if (isCameraActive) {
+          startFrameSending();
+        }
       };
       
       wsRef.current.onmessage = (event) => {
@@ -129,6 +192,26 @@ const App = () => {
     }
   };
 
+  const startFrameSending = () => {
+    if (!isConnected || !isCameraActive) return;
+    
+    const sendFrame = () => {
+      if (wsRef.current?.readyState === WebSocket.OPEN && isCameraActive) {
+        const frameData = captureFrame();
+        if (frameData) {
+          sendMessage({
+            type: 'frame',
+            image_data: frameData,
+            timestamp: Date.now()
+          });
+        }
+        requestAnimationFrame(sendFrame);
+      }
+    };
+    
+    requestAnimationFrame(sendFrame);
+  };
+
   const disconnectWebSocket = () => {
     if (reconnectTimeoutRef.current) {
       clearTimeout(reconnectTimeoutRef.current);
@@ -173,6 +256,14 @@ const App = () => {
     setError(null);
   };
 
+  const toggleCamera = async () => {
+    if (isCameraActive) {
+      stopCamera();
+    } else {
+      await initializeCamera();
+    }
+  };
+
   useEffect(() => {
     connectWebSocket();
     
@@ -183,8 +274,15 @@ const App = () => {
       if (wsRef.current) {
         wsRef.current.close(1000);
       }
+      stopCamera();
     };
   }, []);
+
+  useEffect(() => {
+    if (isConnected && isCameraActive) {
+      startFrameSending();
+    }
+  }, [isConnected, isCameraActive]);
 
   const getGestureEmoji = (gesture) => {
     const emojiMap = {
@@ -220,13 +318,13 @@ const App = () => {
   };
 
   const ErrorAlert = () => {
-    if (!error) return null;
+    if (!error && !cameraError) return null;
 
     return (
       <div className="error-alert">
         <div className="error-content">
           <AlertCircle size={20} />
-          <span>{error}</span>
+          <span>{error || cameraError}</span>
           <button onClick={dismissError} className="error-dismiss">
             <X size={16} />
           </button>
@@ -403,6 +501,14 @@ const App = () => {
                 </button>
               )}
               <button 
+                onClick={toggleCamera}
+                className={`btn ${isCameraActive ? 'btn-danger' : 'btn-primary'}`}
+                title={isCameraActive ? 'Turn off camera' : 'Turn on camera'}
+              >
+                {isCameraActive ? <VideoOff size={16} /> : <Video size={16} />}
+                {isCameraActive ? 'Stop Camera' : 'Start Camera'}
+              </button>
+              <button 
                 onClick={() => setShowSettings(!showSettings)}
                 className="btn btn-secondary"
                 title="Settings"
@@ -486,27 +592,60 @@ const App = () => {
           <div className="camera-section">
             <div className="section-header">
               <h2>Live Camera Feed</h2>
-              <div className="status-indicator">
-                {isConnected ? (
-                  <span className="status-dot connected"></span>
-                ) : (
-                  <span className="status-dot disconnected"></span>
-                )}
+              <div className="camera-controls">
+                <div className="status-indicator">
+                  {isCameraActive ? (
+                    <span className="status-dot recording"></span>
+                  ) : (
+                    <span className="status-dot disconnected"></span>
+                  )}
+                  <span>{isCameraActive ? 'Camera Active' : 'Camera Off'}</span>
+                </div>
               </div>
             </div>
-            <div className="camera-placeholder">
-              <Camera size={64} color="#6B7280" />
-              <h3>Camera Feed</h3>
-              <p>
-                {isConnected 
-                  ? 'Python backend is processing camera feed'
-                  : 'Connect to view live camera feed'
-                }
-              </p>
-              {!isConnected && reconnectAttempts > 0 && (
-                <p className="reconnect-info">
-                  Reconnection attempt {reconnectAttempts}/{maxReconnectAttempts}
-                </p>
+            <div className="camera-container">
+              {isCameraActive ? (
+                <div className="camera-feed">
+                  <video
+                    ref={videoRef}
+                    autoPlay
+                    playsInline
+                    muted
+                    className="camera-video"
+                  />
+                  <canvas ref={canvasRef} style={{ display: 'none' }} />
+                  <div className="camera-overlay">
+                    {gestures.length > 0 && (
+                      <div className="gesture-overlay">
+                        {gestures.map((gesture, index) => (
+                          <div key={index} className="gesture-badge">
+                            {getGestureEmoji(gesture.gesture)} {gesture.description}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                    {isLearningMode && (
+                      <div className="learning-overlay">
+                        <div className="learning-pulse">
+                          <BookOpen size={24} />
+                          <span>Learning: {learningGesture}</span>
+                          <span>{learningSamples}/10 samples</span>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ) : (
+                <div className="camera-placeholder">
+                  <Camera size={64} color="#6B7280" />
+                  <h3>Camera Feed</h3>
+                  <p>Click "Start Camera" to begin gesture recognition</p>
+                  {!isConnected && (
+                    <p className="connection-info">
+                      Connect to the backend server first
+                    </p>
+                  )}
+                </div>
               )}
             </div>
           </div>
@@ -550,11 +689,11 @@ const App = () => {
               <div className="no-gestures">
                 <Hand size={48} color="#6B7280" />
                 <p>
-                  {isConnected 
+                  {isConnected && isCameraActive
                     ? (isLearningMode 
                         ? `Learning "${learningGesture}" - perform the gesture now!`
                         : 'No gestures detected. Show your hand to the camera!')
-                    : 'Connect to start detecting gestures'
+                    : 'Connect and enable camera to start detecting gestures'
                   }
                 </p>
               </div>
