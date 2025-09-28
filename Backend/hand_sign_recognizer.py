@@ -13,11 +13,16 @@ import logging
 from typing import Dict, List, Tuple, Optional, Callable
 import pickle
 import os
-warnings.filterwarnings('ignore')
 
 # Set up logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
+
+# Suppress warnings
+warnings.filterwarnings('ignore')
 
 class CustomGesture:
     """Class to handle custom gesture definitions"""
@@ -29,13 +34,13 @@ class CustomGesture:
         self.created_at = time.time()
 
 class EnhancedHandSignRecognizer:
-    def __init__(self, port=5000):
+    def __init__(self, port=5000, host='localhost'):
         print("🚀 Initializing Enhanced Hand Sign Recognition System...")
         
         # Initialize MediaPipe with optimized settings
         self.mp_hands = mp.solutions.hands
         self.hands = self.mp_hands.Hands(
-            static_image_mode=True,  # Changed to True for frame processing
+            static_image_mode=True,
             max_num_hands=2,
             min_detection_confidence=0.7,
             min_tracking_confidence=0.5
@@ -43,8 +48,9 @@ class EnhancedHandSignRecognizer:
         self.mp_drawing = mp.solutions.drawing_utils
         self.mp_drawing_styles = mp.solutions.drawing_styles
         
-        # Enhanced socket configuration
+        # Server configuration
         self.port = port
+        self.host = host
         self.clients = set()
         
         # Sign recognition database
@@ -97,7 +103,7 @@ class EnhancedHandSignRecognizer:
             
             with open('custom_gestures.pkl', 'wb') as f:
                 pickle.dump(data, f)
-            print("✅ Custom gestures saved successfully")
+            logger.info("Custom gestures saved successfully")
         except Exception as e:
             logger.error(f"Error saving custom gestures: {e}")
     
@@ -122,7 +128,7 @@ class EnhancedHandSignRecognizer:
                     self.custom_gestures[name] = custom_gesture
                     self.gesture_training_data[name] = gesture_data['training_data']
                 
-                print(f"✅ Loaded {len(self.custom_gestures)} custom gestures")
+                logger.info(f"Loaded {len(self.custom_gestures)} custom gestures")
         except Exception as e:
             logger.error(f"Error loading custom gestures: {e}")
     
@@ -188,6 +194,9 @@ class EnhancedHandSignRecognizer:
     
     def start_learning_gesture(self, gesture_name: str, description: str = ""):
         """Start learning a new custom gesture"""
+        if gesture_name in self.sign_database:
+            return {'status': 'error', 'message': f'Gesture "{gesture_name}" already exists'}
+        
         self.is_learning_mode = True
         self.learning_gesture_name = gesture_name
         self.learning_samples = []
@@ -195,7 +204,7 @@ class EnhancedHandSignRecognizer:
         if not description:
             description = f"Custom gesture: {gesture_name}"
         
-        print(f"🎓 Started learning gesture: {gesture_name}")
+        logger.info(f"Started learning gesture: {gesture_name}")
         return {
             'status': 'learning_started',
             'gesture_name': gesture_name,
@@ -214,12 +223,15 @@ class EnhancedHandSignRecognizer:
             'timestamp': time.time()
         })
         
-        print(f"📝 Added sample {len(self.learning_samples)} for {self.learning_gesture_name}")
+        logger.info(f"Added sample {len(self.learning_samples)} for {self.learning_gesture_name}")
         return len(self.learning_samples)
     
     def finish_learning_gesture(self):
         """Finish learning and save the custom gesture"""
-        if not self.is_learning_mode or len(self.learning_samples) < 5:
+        if not self.is_learning_mode:
+            return {'status': 'error', 'message': 'Not in learning mode'}
+        
+        if len(self.learning_samples) < 5:
             return {'status': 'error', 'message': 'Need at least 5 samples to create gesture'}
         
         detection_func = self.create_learned_detection_function(self.learning_samples)
@@ -252,7 +264,7 @@ class EnhancedHandSignRecognizer:
         
         self.save_custom_gestures()
         
-        print(f"✅ Successfully created custom gesture: {result['gesture_name']}")
+        logger.info(f"Successfully created custom gesture: {result['gesture_name']}")
         return result
     
     def cancel_learning(self):
@@ -267,7 +279,7 @@ class EnhancedHandSignRecognizer:
         self.learning_gesture_name = None
         self.learning_samples = []
         
-        print(f"❌ Cancelled learning for: {result['gesture_name']}")
+        logger.info(f"Cancelled learning for: {result['gesture_name']}")
         return result
     
     def delete_custom_gesture(self, gesture_name: str):
@@ -280,7 +292,7 @@ class EnhancedHandSignRecognizer:
                 del self.sign_database[gesture_name]
             
             self.save_custom_gestures()
-            print(f"🗑️ Deleted custom gesture: {gesture_name}")
+            logger.info(f"Deleted custom gesture: {gesture_name}")
             return {'status': 'success', 'message': f'Gesture {gesture_name} deleted'}
         else:
             return {'status': 'error', 'message': f'Gesture {gesture_name} not found'}
@@ -365,6 +377,7 @@ class EnhancedHandSignRecognizer:
         finger_states = features['finger_states']
         finger_distances = features['finger_distances']
         
+        # Check custom gestures first
         for name, custom_gesture in self.custom_gestures.items():
             try:
                 detected, confidence = custom_gesture.detection_function(features)
@@ -373,6 +386,7 @@ class EnhancedHandSignRecognizer:
             except Exception as e:
                 logger.error(f"Error in custom gesture detection for {name}: {e}")
         
+        # Built-in gesture recognition
         if finger_states[0] and not any(finger_states[1:]):
             thumb_up_confidence = 0.9 if features['hand_orientation'] < -0.5 else 0.7
             return 'thumbs_up', thumb_up_confidence
@@ -442,7 +456,7 @@ class EnhancedHandSignRecognizer:
     def process_frame(self, frame):
         """Process a single frame for hand detection and gesture recognition"""
         if frame is None:
-            return None, {
+            return {
                 'type': 'gesture',
                 'timestamp': time.time(),
                 'gestures': [],
@@ -452,43 +466,57 @@ class EnhancedHandSignRecognizer:
                 'learning_samples': len(self.learning_samples) if self.is_learning_mode else 0
             }
         
-        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        results = self.hands.process(rgb_frame)
-        
-        gesture_data = {
-            'type': 'gesture',
-            'timestamp': time.time(),
-            'gestures': [],
-            'fps': self.current_fps,
-            'learning_mode': self.is_learning_mode,
-            'learning_gesture': self.learning_gesture_name,
-            'learning_samples': len(self.learning_samples) if self.is_learning_mode else 0
-        }
-        
-        if results.multi_hand_landmarks:
-            for hand_idx, hand_landmarks in enumerate(results.multi_hand_landmarks):
-                features = self.calculate_hand_features(hand_landmarks)
-                
-                if self.is_learning_mode and features:
-                    sample_count = self.add_learning_sample(features)
-                    gesture_data['learning_samples'] = sample_count
-                
-                gesture, confidence = self.recognize_gesture(features)
-                
-                stable_gesture, stable_confidence = self.smooth_gesture(gesture, confidence)
-                
-                if stable_gesture and stable_confidence > self.sign_database.get(stable_gesture, {}).get('confidence_threshold', 0.7):
-                    gesture_info = {
-                        'hand_index': hand_idx,
-                        'gesture': stable_gesture,
-                        'confidence': stable_confidence,
-                        'description': self.sign_database[stable_gesture]['description'],
-                        'hand_position': features['palm_center'].tolist(),
-                        'is_custom': stable_gesture in self.custom_gestures
-                    }
-                    gesture_data['gestures'].append(gesture_info)
-        
-        return gesture_data
+        try:
+            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            results = self.hands.process(rgb_frame)
+            
+            gesture_data = {
+                'type': 'gesture',
+                'timestamp': time.time(),
+                'gestures': [],
+                'fps': self.current_fps,
+                'learning_mode': self.is_learning_mode,
+                'learning_gesture': self.learning_gesture_name,
+                'learning_samples': len(self.learning_samples) if self.is_learning_mode else 0
+            }
+            
+            if results.multi_hand_landmarks:
+                for hand_idx, hand_landmarks in enumerate(results.multi_hand_landmarks):
+                    features = self.calculate_hand_features(hand_landmarks)
+                    
+                    if self.is_learning_mode and features:
+                        sample_count = self.add_learning_sample(features)
+                        gesture_data['learning_samples'] = sample_count
+                    
+                    gesture, confidence = self.recognize_gesture(features)
+                    
+                    stable_gesture, stable_confidence = self.smooth_gesture(gesture, confidence)
+                    
+                    if stable_gesture and stable_confidence > self.sign_database.get(stable_gesture, {}).get('confidence_threshold', 0.7):
+                        gesture_info = {
+                            'hand_index': hand_idx,
+                            'gesture': stable_gesture,
+                            'confidence': stable_confidence,
+                            'description': self.sign_database[stable_gesture]['description'],
+                            'hand_position': features['palm_center'].tolist(),
+                            'is_custom': stable_gesture in self.custom_gestures
+                        }
+                        gesture_data['gestures'].append(gesture_info)
+            
+            return gesture_data
+            
+        except Exception as e:
+            logger.error(f"Error processing frame: {e}")
+            return {
+                'type': 'gesture',
+                'timestamp': time.time(),
+                'gestures': [],
+                'fps': self.current_fps,
+                'learning_mode': self.is_learning_mode,
+                'learning_gesture': self.learning_gesture_name,
+                'learning_samples': len(self.learning_samples) if self.is_learning_mode else 0,
+                'error': str(e)
+            }
     
     def update_fps(self):
         """Update FPS counter"""
@@ -500,30 +528,46 @@ class EnhancedHandSignRecognizer:
             self.fps_counter = 0
             self.fps_start_time = current_time
     
-    async def register_client(self, websocket, /):
+    async def register_client(self, websocket, path):
         """Register a new client"""
         self.clients.add(websocket)
-        print(f"📱 Client connected. Total clients: {len(self.clients)}")
-        
-        initial_data = {
-            'type': 'init',
-            'supported_gestures': list(self.sign_database.keys()),
-            'custom_gestures': list(self.custom_gestures.keys())
-        }
-        await websocket.send(json.dumps(initial_data))
+        logger.info(f"Client connected. Total clients: {len(self.clients)}")
         
         try:
+            # Send initial data
+            initial_data = {
+                'type': 'init',
+                'supported_gestures': list(self.sign_database.keys()),
+                'custom_gestures': list(self.custom_gestures.keys()),
+                'message': 'Connected to Hand Gesture Recognition Server'
+            }
+            await websocket.send(json.dumps(initial_data))
+            
+            # Handle incoming messages
             async for message in websocket:
                 try:
                     data = json.loads(message)
                     await self.handle_client_message(websocket, data)
-                except json.JSONDecodeError:
-                    logger.error("Invalid JSON received from client")
+                except json.JSONDecodeError as e:
+                    logger.error(f"Invalid JSON received from client: {e}")
+                    await websocket.send(json.dumps({
+                        'status': 'error',
+                        'message': 'Invalid JSON format'
+                    }))
+                except Exception as e:
+                    logger.error(f"Error handling client message: {e}")
+                    await websocket.send(json.dumps({
+                        'status': 'error',
+                        'message': f'Server error: {str(e)}'
+                    }))
+                    
         except websockets.exceptions.ConnectionClosed:
-            print("📱 Client connection closed")
+            logger.info("Client connection closed")
+        except Exception as e:
+            logger.error(f"Error in client connection: {e}")
         finally:
             self.clients.remove(websocket)
-            print(f"📱 Client disconnected. Total clients: {len(self.clients)}")
+            logger.info(f"Client disconnected. Total clients: {len(self.clients)}")
     
     async def handle_client_message(self, websocket, data):
         """Handle messages from clients"""
@@ -538,7 +582,8 @@ class EnhancedHandSignRecognizer:
         elif message_type == 'finish_learning':
             result = self.finish_learning_gesture()
             await websocket.send(json.dumps(result))
-            await self.broadcast_gesture_list_update()
+            if result['status'] == 'success':
+                await self.broadcast_gesture_list_update()
         
         elif message_type == 'cancel_learning':
             result = self.cancel_learning()
@@ -564,10 +609,15 @@ class EnhancedHandSignRecognizer:
             image_data = data.get('image_data')
             if image_data:
                 frame = self.base64_to_image(image_data)
-                if frame is not None:
-                    self.update_fps()
-                    gesture_data = self.process_frame(frame)
-                    await websocket.send(json.dumps(gesture_data))
+                self.update_fps()
+                gesture_data = self.process_frame(frame)
+                await websocket.send(json.dumps(gesture_data))
+        
+        else:
+            await websocket.send(json.dumps({
+                'status': 'error',
+                'message': f'Unknown message type: {message_type}'
+            }))
     
     async def broadcast_gesture_list_update(self):
         """Broadcast updated gesture list to all clients"""
@@ -580,41 +630,48 @@ class EnhancedHandSignRecognizer:
     
     async def broadcast_to_clients(self, data):
         """Send data to all connected clients"""
-        if self.clients:
-            message = json.dumps(data)
-            disconnected_clients = []
+        if not self.clients:
+            return
             
-            for client in self.clients.copy():
-                try:
-                    await client.send(message)
-                except websockets.exceptions.ConnectionClosed:
-                    disconnected_clients.append(client)
-                except Exception as e:
-                    logger.error(f"Error sending to client: {e}")
-                    disconnected_clients.append(client)
-            
-            for client in disconnected_clients:
-                self.clients.discard(client)
+        message = json.dumps(data)
+        disconnected_clients = []
+        
+        for client in self.clients.copy():
+            try:
+                await client.send(message)
+            except websockets.exceptions.ConnectionClosed:
+                disconnected_clients.append(client)
+            except Exception as e:
+                logger.error(f"Error sending to client: {e}")
+                disconnected_clients.append(client)
+        
+        for client in disconnected_clients:
+            self.clients.discard(client)
     
     async def start_websocket_server(self):
         """Start the WebSocket server"""
-        print(f"🌐 Starting WebSocket server on port {self.port}...")
+        logger.info(f"Starting WebSocket server on {self.host}:{self.port}...")
         
-        server = await websockets.serve(
-            self.register_client, 
-            'localhost', 
-            self.port,
-            ping_interval=20,
-            ping_timeout=10
-        )
-        
-        print(f"✅ WebSocket server running on ws://localhost:{self.port}")
-        return server
+        try:
+            server = await websockets.serve(
+                self.register_client, 
+                self.host, 
+                self.port,
+                ping_interval=20,
+                ping_timeout=10,
+                max_size=10 * 1024 * 1024  # 10MB max message size for images
+            )
+            
+            logger.info(f"✅ WebSocket server running on ws://{self.host}:{self.port}")
+            return server
+        except Exception as e:
+            logger.error(f"Failed to start WebSocket server: {e}")
+            raise
     
     async def run(self):
         """Run the complete system"""
-        print("🚀 Starting Enhanced Hand Sign Recognition System...")
-        print("📱 Camera feed now handled by frontend")
+        logger.info("🚀 Starting Enhanced Hand Sign Recognition System...")
+        logger.info("📱 Camera feed handled by frontend")
         
         server = await self.start_websocket_server()
         
@@ -622,21 +679,34 @@ class EnhancedHandSignRecognizer:
             # Keep the server running
             await asyncio.Future()
         except KeyboardInterrupt:
-            print("🛑 Shutting down system...")
+            logger.info("🛑 Shutting down system...")
         finally:
             server.close()
             await server.wait_closed()
-            print("✅ System shutdown complete")
+            logger.info("✅ System shutdown complete")
+    
+    def get_system_stats(self):
+        """Get current system statistics"""
+        return {
+            'connected_clients': len(self.clients),
+            'current_fps': self.current_fps,
+            'supported_gestures': len(self.sign_database),
+            'custom_gestures': len(self.custom_gestures),
+            'learning_mode': self.is_learning_mode,
+            'learning_gesture': self.learning_gesture_name,
+            'learning_samples': len(self.learning_samples) if self.is_learning_mode else 0
+        }
 
 
 async def main():
     """Main function to run the hand sign recognition system"""
     try:
-        recognizer = EnhancedHandSignRecognizer(port=5000)
+        # Create and run the recognition system
+        recognizer = EnhancedHandSignRecognizer(port=5000, host='localhost')
         await recognizer.run()
     except Exception as e:
+        logger.error(f"Fatal error: {e}")
         print(f"❌ Fatal error: {e}")
-        logger.error(f"Fatal error in main: {e}")
 
 
 if __name__ == "__main__":
@@ -652,4 +722,5 @@ if __name__ == "__main__":
     print("📱 Open the React app to use the camera")
     print("=" * 60)
     
+    # Run the main async function
     asyncio.run(main())

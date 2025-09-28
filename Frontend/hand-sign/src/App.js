@@ -23,40 +23,86 @@ const App = () => {
   const [isCameraActive, setIsCameraActive] = useState(false);
   const [cameraStream, setCameraStream] = useState(null);
   const [cameraError, setCameraError] = useState(null);
+  const [isLoading, setIsLoading] = useState(false);
   
   const wsRef = useRef(null);
   const reconnectTimeoutRef = useRef(null);
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   const maxReconnectAttempts = 5;
+  const frameIntervalRef = useRef(null);
 
-  // Initialize camera
+  // Initialize camera with better error handling
   const initializeCamera = async () => {
     try {
+      setIsLoading(true);
       setCameraError(null);
+      
+      // Check if browser supports media devices
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        throw new Error('Camera API not supported in this browser');
+      }
+
       const stream = await navigator.mediaDevices.getUserMedia({ 
         video: { 
           width: { ideal: 640 },
           height: { ideal: 480 },
           frameRate: { ideal: 30 }
-        } 
+        },
+        audio: false
       });
       
       setCameraStream(stream);
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
+        
+        // Wait for video to be ready
+        await new Promise((resolve) => {
+          if (videoRef.current) {
+            videoRef.current.onloadedmetadata = () => {
+              resolve();
+            };
+          }
+        });
       }
       setIsCameraActive(true);
+      setError(null);
+      
+      // Start sending frames if connected
+      if (isConnected) {
+        startFrameSending();
+      }
     } catch (err) {
       console.error('Error accessing camera:', err);
-      setCameraError('Cannot access camera. Please check permissions.');
+      let errorMessage = 'Cannot access camera. ';
+      
+      if (err.name === 'NotAllowedError') {
+        errorMessage += 'Please allow camera permissions and refresh the page.';
+      } else if (err.name === 'NotFoundError') {
+        errorMessage += 'No camera found. Please connect a camera and try again.';
+      } else if (err.name === 'NotSupportedError') {
+        errorMessage += 'Camera not supported in this browser.';
+      } else {
+        errorMessage += `Error: ${err.message}`;
+      }
+      
+      setCameraError(errorMessage);
       setIsCameraActive(false);
+    } finally {
+      setIsLoading(false);
     }
   };
 
   const stopCamera = () => {
+    if (frameIntervalRef.current) {
+      cancelAnimationFrame(frameIntervalRef.current);
+      frameIntervalRef.current = null;
+    }
+    
     if (cameraStream) {
-      cameraStream.getTracks().forEach(track => track.stop());
+      cameraStream.getTracks().forEach(track => {
+        track.stop();
+      });
       setCameraStream(null);
     }
     setIsCameraActive(false);
@@ -68,19 +114,29 @@ const App = () => {
   const captureFrame = () => {
     if (!videoRef.current || !canvasRef.current || !isCameraActive) return null;
     
-    const video = videoRef.current;
-    const canvas = canvasRef.current;
-    const ctx = canvas.getContext('2d');
-    
-    // Set canvas size to match video
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-    
-    // Draw current video frame to canvas
-    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-    
-    // Convert to base64 for sending
-    return canvas.toDataURL('image/jpeg', 0.8);
+    try {
+      const video = videoRef.current;
+      const canvas = canvasRef.current;
+      const ctx = canvas.getContext('2d');
+      
+      // Ensure video is ready
+      if (video.videoWidth === 0 || video.videoHeight === 0) {
+        return null;
+      }
+      
+      // Set canvas size to match video
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      
+      // Draw current video frame to canvas
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      
+      // Convert to base64 for sending
+      return canvas.toDataURL('image/jpeg', 0.7);
+    } catch (err) {
+      console.error('Error capturing frame:', err);
+      return null;
+    }
   };
 
   const connectWebSocket = () => {
@@ -92,14 +148,18 @@ const App = () => {
     setError(null);
     
     try {
-      wsRef.current = new WebSocket('ws://localhost:5000');
+      // Create WebSocket connection with error handling
+      const wsUrl = 'ws://localhost:5000';
+      wsRef.current = new WebSocket(wsUrl);
       
       wsRef.current.onopen = () => {
-        console.log('Connected to hand gesture recognition server');
+        console.log('✅ Connected to hand gesture recognition server');
         setIsConnected(true);
         setConnectionStatus('connected');
         setReconnectAttempts(0);
         setError(null);
+        
+        // Request initial gesture list
         sendMessage({ type: 'get_gestures' });
         
         // Start sending frames if camera is active
@@ -111,6 +171,7 @@ const App = () => {
       wsRef.current.onmessage = (event) => {
         try {
           const data = JSON.parse(event.data);
+          console.log('📨 Received message:', data.type);
           
           if (data.type === 'gesture') {
             setGestures(data.gestures || []);
@@ -121,7 +182,7 @@ const App = () => {
             
             if (data.gestures && data.gestures.length > 0) {
               setTotalGesturesDetected(prev => prev + data.gestures.length);
-              setLastGestureTime(new Date(data.timestamp * 1000));
+              setLastGestureTime(new Date());
             }
           } else if (data.type === 'init' || data.type === 'gesture_list' || data.type === 'gesture_list_update') {
             setAllGestures(data.gestures || []);
@@ -131,6 +192,7 @@ const App = () => {
               setIsLearningMode(true);
               setLearningGesture(data.gesture_name);
               setLearningSamples(0);
+              setError(null);
             } else if (data.status === 'success') {
               setIsLearningMode(false);
               setLearningGesture('');
@@ -138,87 +200,127 @@ const App = () => {
               setShowAddGestureModal(false);
               setNewGestureName('');
               setNewGestureDescription('');
+              setError(null);
               sendMessage({ type: 'get_gestures' });
             } else if (data.status === 'cancelled') {
               setIsLearningMode(false);
               setLearningGesture('');
               setLearningSamples(0);
               setShowAddGestureModal(false);
+              setError(null);
             } else if (data.status === 'error') {
               setError(data.message || 'An error occurred');
             }
           }
         } catch (error) {
-          console.error('Error parsing WebSocket message:', error);
+          console.error('❌ Error parsing WebSocket message:', error);
           setError('Error parsing server message');
         }
       };
       
       wsRef.current.onclose = (event) => {
-        console.log('Disconnected from server');
+        console.log('🔌 Disconnected from server:', event.code, event.reason);
         setIsConnected(false);
         setConnectionStatus('disconnected');
         setGestures([]);
         setIsLearningMode(false);
         
+        // Stop frame sending
+        if (frameIntervalRef.current) {
+          cancelAnimationFrame(frameIntervalRef.current);
+          frameIntervalRef.current = null;
+        }
+        
         if (event.code !== 1000 && reconnectAttempts < maxReconnectAttempts) {
           const timeout = Math.min(1000 * Math.pow(2, reconnectAttempts), 10000);
-          console.log(`Attempting to reconnect in ${timeout}ms...`);
+          console.log(`🔄 Attempting to reconnect in ${timeout}ms...`);
           
           reconnectTimeoutRef.current = setTimeout(() => {
             setReconnectAttempts(prev => prev + 1);
             connectWebSocket();
           }, timeout);
+        } else if (reconnectAttempts >= maxReconnectAttempts) {
+          setError('Failed to connect to server after multiple attempts. Please check if the backend is running.');
         }
       };
       
       wsRef.current.onerror = (error) => {
-        console.error('WebSocket error:', error);
+        console.error('❌ WebSocket error:', error);
         setConnectionStatus('error');
-        setError('Connection error. Make sure the Python backend is running.');
+        setError('Connection error. Make sure the Python backend is running on port 5000.');
       };
     } catch (error) {
-      console.error('Failed to create WebSocket connection:', error);
+      console.error('❌ Failed to create WebSocket connection:', error);
       setConnectionStatus('error');
-      setError('Failed to create WebSocket connection');
+      setError('Failed to create WebSocket connection. The server might be down.');
     }
   };
 
   const sendMessage = (message) => {
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify(message));
+      try {
+        wsRef.current.send(JSON.stringify(message));
+        return true;
+      } catch (err) {
+        console.error('Error sending message:', err);
+        setError('Failed to send message to server');
+        return false;
+      }
     } else {
       setError('Not connected to server');
+      return false;
     }
   };
 
   const startFrameSending = () => {
     if (!isConnected || !isCameraActive) return;
     
+    // Clear any existing interval
+    if (frameIntervalRef.current) {
+      cancelAnimationFrame(frameIntervalRef.current);
+    }
+    
     const sendFrame = () => {
       if (wsRef.current?.readyState === WebSocket.OPEN && isCameraActive) {
         const frameData = captureFrame();
         if (frameData) {
-          sendMessage({
+          const sent = sendMessage({
             type: 'frame',
             image_data: frameData,
             timestamp: Date.now()
           });
+          
+          if (!sent) {
+            // Stop sending if message failed
+            cancelAnimationFrame(frameIntervalRef.current);
+            return;
+          }
         }
-        requestAnimationFrame(sendFrame);
+        frameIntervalRef.current = requestAnimationFrame(sendFrame);
       }
     };
     
-    requestAnimationFrame(sendFrame);
+    frameIntervalRef.current = requestAnimationFrame(sendFrame);
   };
 
   const disconnectWebSocket = () => {
+    // Clear reconnection timeout
     if (reconnectTimeoutRef.current) {
       clearTimeout(reconnectTimeoutRef.current);
+      reconnectTimeoutRef.current = null;
     }
+    
+    // Stop frame sending
+    if (frameIntervalRef.current) {
+      cancelAnimationFrame(frameIntervalRef.current);
+      frameIntervalRef.current = null;
+    }
+    
+    // Close WebSocket
     if (wsRef.current) {
-      wsRef.current.close(1000);
+      wsRef.current.close(1000, 'User disconnected');
     }
+    
     setIsConnected(false);
     setConnectionStatus('disconnected');
     setReconnectAttempts(0);
@@ -226,34 +328,53 @@ const App = () => {
   };
 
   const startLearningGesture = () => {
-    if (newGestureName.trim()) {
-      sendMessage({
-        type: 'start_learning',
-        gesture_name: newGestureName.trim(),
-        description: newGestureDescription.trim()
-      });
+    if (!newGestureName.trim()) {
+      setError('Please enter a gesture name');
+      return;
+    }
+    
+    if (!isConnected) {
+      setError('Not connected to server');
+      return;
+    }
+    
+    const sent = sendMessage({
+      type: 'start_learning',
+      gesture_name: newGestureName.trim(),
+      description: newGestureDescription.trim() || `Custom gesture: ${newGestureName.trim()}`
+    });
+    
+    if (!sent) {
+      setError('Failed to start learning gesture');
     }
   };
 
   const finishLearningGesture = () => {
-    sendMessage({ type: 'finish_learning' });
+    if (!sendMessage({ type: 'finish_learning' })) {
+      setError('Failed to finish learning gesture');
+    }
   };
 
   const cancelLearningGesture = () => {
-    sendMessage({ type: 'cancel_learning' });
+    if (!sendMessage({ type: 'cancel_learning' })) {
+      setError('Failed to cancel learning gesture');
+    }
   };
 
   const deleteCustomGesture = (gestureName) => {
     if (window.confirm(`Are you sure you want to delete the gesture "${gestureName}"?`)) {
-      sendMessage({
+      if (!sendMessage({
         type: 'delete_gesture',
         gesture_name: gestureName
-      });
+      })) {
+        setError('Failed to delete gesture');
+      }
     }
   };
 
   const dismissError = () => {
     setError(null);
+    setCameraError(null);
   };
 
   const toggleCamera = async () => {
@@ -264,6 +385,13 @@ const App = () => {
     }
   };
 
+  const retryConnection = () => {
+    dismissError();
+    setReconnectAttempts(0);
+    connectWebSocket();
+  };
+
+  // Effect for WebSocket connection
   useEffect(() => {
     connectWebSocket();
     
@@ -272,16 +400,28 @@ const App = () => {
         clearTimeout(reconnectTimeoutRef.current);
       }
       if (wsRef.current) {
-        wsRef.current.close(1000);
+        wsRef.current.close(1000, 'Component unmounted');
       }
       stopCamera();
     };
   }, []);
 
+  // Effect for frame sending when camera or connection changes
   useEffect(() => {
     if (isConnected && isCameraActive) {
       startFrameSending();
+    } else {
+      if (frameIntervalRef.current) {
+        cancelAnimationFrame(frameIntervalRef.current);
+        frameIntervalRef.current = null;
+      }
     }
+    
+    return () => {
+      if (frameIntervalRef.current) {
+        cancelAnimationFrame(frameIntervalRef.current);
+      }
+    };
   }, [isConnected, isCameraActive]);
 
   const getGestureEmoji = (gesture) => {
@@ -325,9 +465,16 @@ const App = () => {
         <div className="error-content">
           <AlertCircle size={20} />
           <span>{error || cameraError}</span>
-          <button onClick={dismissError} className="error-dismiss">
-            <X size={16} />
-          </button>
+          <div className="error-actions">
+            {(error && error.includes('connection') || error.includes('server')) && (
+              <button onClick={retryConnection} className="btn btn-sm btn-primary">
+                Retry
+              </button>
+            )}
+            <button onClick={dismissError} className="error-dismiss">
+              <X size={16} />
+            </button>
+          </div>
         </div>
       </div>
     );
@@ -354,6 +501,7 @@ const App = () => {
                 }
               }}
               className="modal-close"
+              disabled={isLoading}
             >
               <X size={20} />
             </button>
@@ -371,6 +519,7 @@ const App = () => {
                     placeholder="Enter gesture name (e.g., wave, salute)"
                     className="form-input"
                     maxLength={20}
+                    disabled={isLoading}
                   />
                 </div>
                 <div className="form-group">
@@ -382,6 +531,7 @@ const App = () => {
                     placeholder="Brief description of the gesture"
                     className="form-input"
                     maxLength={50}
+                    disabled={isLoading}
                   />
                 </div>
                 <div className="form-info">
@@ -425,15 +575,22 @@ const App = () => {
                     setNewGestureDescription('');
                   }}
                   className="btn btn-secondary"
+                  disabled={isLoading}
                 >
                   Cancel
                 </button>
                 <button 
                   onClick={startLearningGesture}
-                  disabled={!newGestureName.trim() || !isConnected}
+                  disabled={!newGestureName.trim() || !isConnected || isLoading}
                   className="btn btn-primary"
                 >
-                  <BookOpen size={16} /> Start Learning
+                  {isLoading ? (
+                    'Loading...'
+                  ) : (
+                    <>
+                      <BookOpen size={16} /> Start Learning
+                    </>
+                  )}
                 </button>
               </>
             ) : (
@@ -441,15 +598,22 @@ const App = () => {
                 <button 
                   onClick={cancelLearningGesture}
                   className="btn btn-danger"
+                  disabled={isLoading}
                 >
                   Cancel Learning
                 </button>
                 <button 
                   onClick={finishLearningGesture}
-                  disabled={learningSamples < 5}
+                  disabled={learningSamples < 5 || isLoading}
                   className="btn btn-success"
                 >
-                  <Save size={16} /> Finish Learning
+                  {isLoading ? (
+                    'Saving...'
+                  ) : (
+                    <>
+                      <Save size={16} /> Finish Learning
+                    </>
+                  )}
                 </button>
               </>
             )}
@@ -496,6 +660,7 @@ const App = () => {
                   onClick={() => setShowAddGestureModal(true)}
                   className="btn btn-success"
                   title="Add new custom gesture"
+                  disabled={isLoading}
                 >
                   <Plus size={16} /> Add Gesture
                 </button>
@@ -504,24 +669,32 @@ const App = () => {
                 onClick={toggleCamera}
                 className={`btn ${isCameraActive ? 'btn-danger' : 'btn-primary'}`}
                 title={isCameraActive ? 'Turn off camera' : 'Turn on camera'}
+                disabled={isLoading}
               >
-                {isCameraActive ? <VideoOff size={16} /> : <Video size={16} />}
+                {isLoading ? (
+                  '...'
+                ) : isCameraActive ? (
+                  <VideoOff size={16} />
+                ) : (
+                  <Video size={16} />
+                )}
                 {isCameraActive ? 'Stop Camera' : 'Start Camera'}
               </button>
               <button 
                 onClick={() => setShowSettings(!showSettings)}
                 className="btn btn-secondary"
                 title="Settings"
+                disabled={isLoading}
               >
                 <Settings size={16} />
               </button>
               {isConnected ? (
-                <button onClick={disconnectWebSocket} className="btn btn-danger">
+                <button onClick={disconnectWebSocket} className="btn btn-danger" disabled={isLoading}>
                   Disconnect
                 </button>
               ) : (
-                <button onClick={connectWebSocket} className="btn btn-primary">
-                  Connect
+                <button onClick={retryConnection} className="btn btn-primary" disabled={isLoading}>
+                  {isLoading ? 'Connecting...' : 'Connect'}
                 </button>
               )}
             </div>
@@ -744,6 +917,7 @@ const App = () => {
                       onClick={() => deleteCustomGesture(gestureName)}
                       className="delete-gesture-btn"
                       title="Delete custom gesture"
+                      disabled={isLoading}
                     >
                       <Trash2 size={14} />
                     </button>
