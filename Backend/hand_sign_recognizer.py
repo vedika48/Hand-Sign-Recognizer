@@ -40,7 +40,7 @@ class EnhancedHandSignRecognizer:
         # Initialize MediaPipe with optimized settings
         self.mp_hands = mp.solutions.hands
         self.hands = self.mp_hands.Hands(
-            static_image_mode=True,
+            static_image_mode=False,
             max_num_hands=2,
             min_detection_confidence=0.7,
             min_tracking_confidence=0.5
@@ -331,6 +331,7 @@ class EnhancedHandSignRecognizer:
         pinky_mcp = points[17]
         wrist = points[0]
         
+        # Calculate distances for finger state detection
         thumb_extended = distance.euclidean(thumb_tip, thumb_mcp) > distance.euclidean(thumb_mcp, wrist) * 0.5
         index_extended = distance.euclidean(index_tip, index_mcp) > distance.euclidean(index_mcp, wrist) * 0.6
         middle_extended = distance.euclidean(middle_tip, middle_mcp) > distance.euclidean(middle_mcp, wrist) * 0.6
@@ -375,7 +376,6 @@ class EnhancedHandSignRecognizer:
             return None, 0.0
         
         finger_states = features['finger_states']
-        finger_distances = features['finger_distances']
         
         # Check custom gestures first
         for name, custom_gesture in self.custom_gestures.items():
@@ -531,7 +531,7 @@ class EnhancedHandSignRecognizer:
     async def register_client(self, websocket, path):
         """Register a new client"""
         self.clients.add(websocket)
-        logger.info(f"Client connected. Total clients: {len(self.clients)}")
+        print(f"📱 Client connected. Total clients: {len(self.clients)}")
         
         try:
             # Send initial data
@@ -562,12 +562,12 @@ class EnhancedHandSignRecognizer:
                     }))
                     
         except websockets.exceptions.ConnectionClosed:
-            logger.info("Client connection closed")
+            print("📱 Client connection closed")
         except Exception as e:
             logger.error(f"Error in client connection: {e}")
         finally:
             self.clients.remove(websocket)
-            logger.info(f"Client disconnected. Total clients: {len(self.clients)}")
+            print(f"📱 Client disconnected. Total clients: {len(self.clients)}")
     
     async def handle_client_message(self, websocket, data):
         """Handle messages from clients"""
@@ -650,19 +650,19 @@ class EnhancedHandSignRecognizer:
     
     async def start_websocket_server(self):
         """Start the WebSocket server"""
-        logger.info(f"Starting WebSocket server on {self.host}:{self.port}...")
+        print(f"🌐 Starting WebSocket server on port {self.port}...")
         
         try:
             server = await websockets.serve(
                 self.register_client, 
-                self.host, 
+                'localhost', 
                 self.port,
                 ping_interval=20,
                 ping_timeout=10,
                 max_size=10 * 1024 * 1024  # 10MB max message size for images
             )
             
-            logger.info(f"✅ WebSocket server running on ws://{self.host}:{self.port}")
+            print(f"✅ WebSocket server running on ws://localhost:{self.port}")
             return server
         except Exception as e:
             logger.error(f"Failed to start WebSocket server: {e}")
